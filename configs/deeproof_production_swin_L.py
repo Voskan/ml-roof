@@ -1,0 +1,337 @@
+
+# DeepRoof-2026: Production Configuration for A100 Cluster (4 GPUs)
+_base_ = [
+    './swin/swin_large.py', # Inherit Backbone & Neck from Swin-L
+]
+
+# 0. Custom Imports
+custom_imports = dict(
+    imports=[
+        'mmdet.models',
+        'deeproof.models.backbones.swin_v2_compat',
+        'deeproof.datasets.roof_dataset',
+        'deeproof.models.heads.mask2former_head',
+        'deeproof.models.heads.dense_normal_head',
+        'deeproof.models.heads.edge_head',
+        'deeproof.models.deeproof_model',
+        'deeproof.models.heads.geometry_head',
+        'deeproof.models.losses',
+        'deeproof.evaluation.metrics',
+        'deeproof.hooks.progress_hook',
+    ],
+    allow_failed_imports=False)
+
+# 1. Shared Model Settings
+num_classes = 5 # Unified 5-Class Layout Engine (0: BG, 1: Flat, 2: Sloped, 3: Panel, 4: Obstacle)
+data_preprocessor = dict(
+    type='SegDataPreProcessor',
+    mean=[123.675, 116.28, 103.53],
+    std=[58.395, 57.12, 57.375],
+    bgr_to_rgb=True,
+    size_divisor=32,
+    pad_val=0,
+    seg_pad_val=255, # 255 is ignore_index
+    test_cfg=dict(size_divisor=32))
+
+# 1. Model Configuration
+model = dict(
+    type='DeepRoofMask2Former', # Our Multi-Task Model
+    data_preprocessor=data_preprocessor,
+    test_cfg=dict(mode='whole'),
+
+    # Custom Geometry Head
+    geometry_head=dict(
+        type='GeometryHead',
+        embed_dims=256,
+        num_layers=3,
+        hidden_dims=256
+    ),
+
+    # Absolute Ideal: Use PhysicallyWeightedNormalLoss
+    geometry_loss=dict(
+        type='PhysicallyWeightedNormalLoss',
+        loss_weight=2.0,
+        azimuth_weight=1.5  # Heavy focus on slope-aware azimuth
+    ),
+    dense_geometry_head=dict(
+        type='DenseNormalHead',
+        in_channels=192,
+        hidden_channels=128,
+        feat_index=0,
+        num_convs=2,
+    ),
+    dense_normal_loss=dict(
+        type='DeepRoofDenseNormalLoss',
+        angular_weight=1.0,
+        l1_weight=0.5,
+        loss_weight=1.0,
+    ),
+    dense_geometry_loss_weight=0.0,  # No normal maps in MassiveMasterDataset
+    piecewise_planar_loss_weight=0.0,
+    edge_head=dict(
+        type='RoofEdgeHead',
+        in_channels=192,
+        hidden_channels=96,
+        feat_index=0,
+        num_layers=2,
+        out_channels=1,
+    ),
+    edge_loss_weight=0.0,  # No edge GT in MassiveMasterDataset
+    sam_distill_weight=0.0,  # No SAM masks in MassiveMasterDataset
+    topology_loss_weight=0.0,  # Disable until core segmentation converges
+
+    decode_head=dict(
+        type='DeepRoofMask2FormerHead',
+        in_channels=[192, 384, 768, 1536],
+        strides=[4, 8, 16, 32],
+        feat_channels=256,
+        out_channels=256,
+        num_classes=num_classes,
+        num_queries=100,  # Roof images have 5-30 instances; 300 wastes memory
+        num_transformer_feat_level=3,
+        align_corners=False,
+        pixel_decoder=dict(
+            type='mmdet.MSDeformAttnPixelDecoder',
+            num_outs=3,
+            norm_cfg=dict(type='GN', num_groups=32),
+            act_cfg=dict(type='ReLU'),
+            encoder=dict(
+                num_layers=6,
+                layer_cfg=dict(
+                    self_attn_cfg=dict(
+                        embed_dims=256,
+                        num_levels=3,
+                        batch_first=True),
+                    ffn_cfg=dict(
+                        embed_dims=256,
+                        feedforward_channels=1024,
+                        num_fcs=2,
+                        ffn_drop=0.0,
+                        act_cfg=dict(type='ReLU', inplace=True))),
+                init_cfg=None),
+            positional_encoding=dict(
+                num_feats=128, normalize=True),
+            init_cfg=None),
+        enforce_decoder_input_project=False,
+        positional_encoding=dict(
+            num_feats=128, normalize=True),
+        transformer_decoder=dict(
+            return_intermediate=True,
+            num_layers=9,
+            layer_cfg=dict(
+                self_attn_cfg=dict(
+                    embed_dims=256,
+                    num_heads=8,
+                    attn_drop=0.0,
+                    proj_drop=0.0,
+                    dropout_layer=None,
+                    batch_first=True),
+                cross_attn_cfg=dict(
+                    embed_dims=256,
+                    num_heads=8,
+                    attn_drop=0.0,
+                    proj_drop=0.0,
+                    dropout_layer=None,
+                    batch_first=True),
+                ffn_cfg=dict(
+                    embed_dims=256,
+                    feedforward_channels=2048,
+                    num_fcs=2,
+                    ffn_drop=0.0,
+                    act_cfg=dict(type='ReLU', inplace=True))),
+            init_cfg=None),
+        loss_cls=dict(
+            type='DeepRoofCrossEntropyLoss',
+            use_sigmoid=False,
+            loss_weight=2.0,
+            reduction='mean',
+            # V2 dataset: bg=77%, flat=3.9%, sloped=17%, panel=0.5%, obstacle=1.3%
+            # Weights normalized against sloped (largest FG class):
+            # bg=1, flat=5, sloped=1, panel=36, obstacle=13, no_obj=0.1
+            class_weight=[1.0, 5.0, 1.0, 36.0, 13.0, 0.1]),
+        loss_mask=dict(
+            type='DeepRoofHybridMaskLoss',
+            bce_weight=1.0,
+            lovasz_weight=1.0,
+            loss_weight=5.0,
+            reduction='mean'),
+        loss_dice=dict(
+            type='DeepRoofDiceBoundaryLoss',
+            dice_weight=0.8,
+            boundary_weight=0.2,
+            loss_weight=5.0,
+            eps=1e-6,
+            reduction='mean',
+            use_sigmoid=True),
+        train_cfg=dict(
+            num_points=12544,
+            oversample_ratio=3.0,
+            importance_sample_ratio=0.75,
+            assigner=dict(
+                type='mmdet.HungarianAssigner',
+                match_costs=[
+                    # ClassificationCost weight=2.0 gives cls matching higher priority
+                    # vs mask/dice costs. Per-class imbalance is handled by loss_cls.class_weight.
+                    # Note: mmdet.ClassificationCost does not accept a 'class_weight' kwarg.
+                    dict(type='mmdet.ClassificationCost', weight=2.0),
+                    dict(
+                        type='mmdet.CrossEntropyLossCost',
+                        weight=5.0,
+                        use_sigmoid=True),
+                    dict(type='mmdet.DiceCost', weight=5.0, pred_act=True, eps=1.0)
+                ]),
+            sampler=dict(type='mmdet.MaskPseudoSampler')))
+)
+
+# 2. Data Pipeline & Dataloader
+dataset_type = 'DeepRoofDataset'
+data_root = 'data/MassiveMasterDataset/'
+
+# DeepRoofDataset handles loading and augmentation in its custom __getitem__.
+train_pipeline = []
+
+train_dataloader = dict(
+    batch_size=4, # Samples per GPU (4 GPUs = Total Batch Size 16)
+    num_workers=8,
+    timeout=300,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        ann_file='train.txt',
+        img_suffix='.jpg',
+        seg_map_suffix='.png',
+        normal_suffix='.npy',
+        slope_threshold_deg=2.0,
+        min_instance_area_px=16,
+        max_instances_per_image=128,
+        sr_dual_prob=0.25,
+        sr_scale=2.0,
+        image_size=(512, 512),  # Match actual dataset resolution
+        pipeline=train_pipeline
+    )
+)
+
+val_pipeline = []
+
+# Test/inference pipeline: standard mmseg pipeline for external images.
+test_pipeline = [
+    dict(type='LoadImageFromFile'),
+    dict(type='Resize', scale=(512, 512), keep_ratio=False),
+    dict(type='PackSegInputs'),
+]
+
+tta_pipeline = [
+    dict(type='LoadImageFromFile'),
+    dict(
+        type='TestTimeAug',
+        transforms=[
+            [
+                dict(type='Resize', scale_factor=r, keep_ratio=True)
+                for r in [0.75, 1.0, 1.25]
+            ],
+            [
+                dict(type='RandomFlip', prob=0., direction='horizontal'),
+                dict(type='RandomFlip', prob=1., direction='horizontal')
+            ],
+            [dict(type='PackSegInputs')]
+        ])
+]
+
+tta_model = dict(type='SegTTAModel')
+
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=4,
+    timeout=300,
+    persistent_workers=True,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        ann_file='val.txt',
+        img_suffix='.jpg',
+        seg_map_suffix='.png',
+        normal_suffix='.npy',
+        slope_threshold_deg=2.0,
+        min_instance_area_px=16,
+        max_instances_per_image=128,
+        image_size=(512, 512),
+        pipeline=val_pipeline
+    )
+)
+
+val_evaluator = [
+    dict(type='IoUMetric', iou_metrics=['mIoU'], prefix=''),
+    dict(type='DeepRoofBoundaryMetric', tolerance=1),
+    dict(type='DeepRoofFacetMetric', overlap_threshold=0.30),
+]
+test_dataloader = val_dataloader
+test_evaluator = val_evaluator
+
+# 3. Optimizer & Scheduler (A100 Best Practice)
+optimizer = dict(
+    type='AdamW',
+    lr=0.0001,
+    weight_decay=0.05,
+    eps=1e-8,
+    betas=(0.9, 0.999)
+)
+
+optim_wrapper = dict(
+    type='OptimWrapper',
+    optimizer=optimizer,
+    # FIX Bug #1 (production): max_norm=0.01 is the standard for Mask2Former.
+    # 1.0 allows gradients to explode during bipartite matching.
+    clip_grad=dict(max_norm=0.01, norm_type=2),
+    paramwise_cfg=dict(
+        custom_keys={
+            'backbone': dict(lr_mult=0.1, decay_mult=1.0)
+        }
+    )
+)
+
+param_scheduler = [
+    # Linear Warmup for 1500 iterations
+    dict(
+        type='LinearLR',
+        start_factor=0.001,
+        by_epoch=False,
+        begin=0,
+        end=1500
+    ),
+    # Poly Decay for the rest of 100k iters
+    dict(
+        type='PolyLR',
+        power=0.9,
+        begin=1500,
+        end=100000,
+        eta_min=1e-6,
+        by_epoch=False,
+    )
+]
+
+# 4. Runtime Config
+train_cfg = dict(type='IterBasedTrainLoop', max_iters=100000, val_interval=5000)
+val_cfg = dict(type='ValLoop')
+test_cfg = dict(type='TestLoop')
+custom_hooks = [
+    dict(type='DeepRoofProgressHook', interval=10, heartbeat_sec=20, dataloader_warn_sec=90, flush=True),
+]
+default_hooks = dict(
+    logger=dict(
+        type='LoggerHook',
+        interval=10,
+        log_metric_by_epoch=False,
+    ),
+    checkpoint=dict(
+        type='CheckpointHook',
+        by_epoch=False,
+        interval=5000,
+        max_keep_ckpts=3,
+        save_best='mIoU',
+    )
+)
+log_processor = dict(by_epoch=False, window_size=10)
+log_level = 'INFO'

@@ -1,0 +1,163 @@
+# DeepRoof-2026: High-Fidelity 3D Roof Layout Engine
+
+DeepRoof-2026 is an enterprise-grade AI system for Level of Detail 2 (LOD-2) roof reconstruction from high-resolution satellite imagery. It utilizes a **Multi-Task Mask2Former** architecture with a **Swin Transformer V2** backbone to achieve precision in instance segmentation and 3D geometry estimation.
+
+## Features
+- **Instance Segmentation**: Segment individual roof facets with sharp boundaries.
+- **3D Geometry**: Pixel-wise surface normal estimation for pitch and azimuth calculation.
+- **Production Hardened**: Robust inference with reflection padding and fail-safe tile processing.
+- **GIS Integration**: CRS-aware GeoJSON export and GeoTIFF processing.
+
+## Installation
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Install OpenMMLab components
+pip install -U openmim
+mim install mmengine "mmcv>=2.0.0" "mmdet>=3.0.0" "mmsegmentation>=1.0.0"
+```
+
+## Dataset Acquisition
+
+DeepRoof-2026 is trained on high-resolution urban datasets featuring 3D annotations. You can use the provided automated scripts to download these datasets:
+
+### Automated Download (Recommended)
+You can use the unified acquisition script to download all datasets sequentially. **Note**: OmniCity requires a one-time login.
+
+1.  **Login to OpenXLab**:
+    ```bash
+    pip install openxlab
+    openxlab login
+    ```
+    *(Follow the prompts to enter your credentials from https://openxlab.org.cn/)*
+
+2.  **Run Acquisition**:
+    ```bash
+    bash scripts/data/download_all_datasets.sh
+    ```
+
+1.  **OmniCity (NYC)**: High-resolution satellite images with height maps and plane-wise annotations.
+    - [Download OmniCity at OpenDataLab](https://opendatalab.com/OmniCity)
+    - **Script**: `bash scripts/data/download_omnicity.sh` (Requires `openxlab login`).
+2.  **Building3D**: Aerial LiDAR point clouds and mesh models for 16 Estonian cities.
+    - [Official Building3D Repository](https://github.com/Building3D/Building3D)
+    - **Script**: `bash scripts/data/download_building3d.sh` (Downloads Tallinn and Tokyo subsets).
+
+## Data Preparation
+
+To process the OmniCity dataset for training:
+
+```bash
+python scripts/data/process_omnicity.py \
+    --data-root datasets/OmniCity \
+    --output-dir data/OmniCity
+```
+
+## Training
+
+DeepRoof-2026 supports both production training from scratch and fine-tuning on custom datasets.
+
+### 1. Data Preparation
+Run the comprehensive preparation script to organize OmniCity data, calculate surface normals, and generate masks.
+
+```bash
+# If ZIPs are already extracted (recommended if you unzipped manually)
+python scripts/data/prepare_omnicity_v2_final.py \
+    --data-root /workspace/roof/scripts/data \
+    --output-dir /workspace/roof/data/OmniCity \
+    --skip-extract
+```
+
+### 2. Interactive Training (Notebook)
+The most recommended way to train and visualize results is using our new training notebook:
+**Location**: `notebooks/train_deeproof.ipynb`
+
+Features:
+- **Visual Data Audit**: Check image/mask/normal alignment.
+- **Switchable Modes**: Easily toggle between `fine-tune` and `scratch`.
+- **Checkpointing**: Automatically saves the `best_mIoU.pth` model.
+
+### 3. CLI Training (Advanced)
+Alternatively, launch training via command line (optimized for A100 multi-gpu):
+
+```bash
+python scripts/training/train.py --config configs/deeproof_scratch_swin_L.py --amp
+```
+
+*Note: The config `deeproof_scratch_swin_L.py` is currently configured for **fine-tuning** (resuming from iter 40k).*
+
+## Verification
+Ensure the geometry head is training correctly with the multi-task flow:
+```bash
+python -m pytest tests/test_geometry_flow.py
+```
+
+## Inference & Testing
+
+### Interactive Inference (Recommended)
+Use the notebook to visualize per-facet segmentation, normal maps, and slope analysis:
+**Location**: `notebooks/checkpoint_inference_test.ipynb`
+
+### Production Inference (CLI)
+Run the robust inference pipeline on high-resolution GeoTIFFs:
+
+```bash
+python tools/inference.py \
+    --config configs/deeproof_production_swin_L.py \
+    --checkpoint work_dirs/swin_l_finetune_v2/iter_80000.pth \
+    --input input_area.tif \
+    --output result.json \
+    --min_confidence 0.5 \
+    --save_viz
+```
+
+### Merge Strategy Configuration
+Large areas are processed in sliding window tiles. To refine the stitching of these tiles, adjust the following logic in `deeproof/utils/post_processing.py`:
+- **`iou_threshold`**: (Default: 0.5) Overlap threshold to consider two detections as the same object.
+- **`method`**: 
+    - `'score'`: Keep the detection with the highest confidence (best for clean boundaries).
+    - `'union'`: Geometrically merge the overlapping masks (best for large Warehouse roofs cut by tiles).
+
+## Testing & Verification
+
+To verify the mathematical integrity and gradient flow of the Geometry Head:
+
+```bash
+python tests/test_geometry_gradient.py
+```
+
+## Project Structure
+- `configs/`: Production-ready model and training configurations.
+- `deeproof/`: Core library (models, datasets, utils).
+- `scripts/`: Data processing and utility scripts.
+- `tools/`: Training, inference, and weight conversion tools.
+- `tests/`: Unit and integration tests.
+
+---
+© 2026 DeepRoof AI Team. Professional Grade AI for High-Fidelity 3D Reconstruction.
+
+<!-- AUTOGEN:PROJECT_FACTS:BEGIN -->
+## Synced Project Facts
+
+- Project: `DeepRoof-2026`
+- Segmentor: `DeepRoofMask2Former`
+- Backbone: `Swin Transformer V2-Large`
+- Classes: `3`
+- TODO progress: `done=40`, `open=0`
+
+| KPI | Target |
+| --- | --- |
+| Roof mIoU | >= 0.90 |
+| Instance AP50 | >= 0.92 |
+| BFScore | >= 0.85 |
+| Pitch MAE (deg) | <= 3.0 |
+| Azimuth MAE (deg) | <= 7.0 |
+
+**Canonical Commands**
+- Train: `python tools/train.py --config configs/deeproof_production_swin_L.py`
+- Inference: `python tools/inference.py --config configs/deeproof_production_swin_L.py --checkpoint work_dirs/deeproof_absolute_ideal_v1/iter_15000.pth --input /path/to/image.tif --output /path/to/result.geojson`
+- Performance profile: `python tools/perf_profile.py --config configs/deeproof_production_swin_L.py --checkpoint /path/to/model.pth --input /path/to/image.png --mode balanced --runs 10`
+- Model registry gate: `python tools/model_registry.py --checkpoint /path/to/model.pth --metrics-json /path/to/metrics.json`
+<!-- AUTOGEN:PROJECT_FACTS:END -->
