@@ -330,7 +330,8 @@ default_hooks = dict(
         by_epoch=False,
         interval=5000,
         max_keep_ckpts=3,
-        save_best='mIoU',
+        save_best='facet/AP50',
+        rule='greater',
     )
 )
 log_processor = dict(by_epoch=False, window_size=10)
