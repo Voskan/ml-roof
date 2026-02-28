@@ -658,7 +658,7 @@ def run_production_inference():
     merged_instances = merge_tiles(
         all_raw_instances,
         iou_threshold=float(args.tile_merge_iou),
-        method='score',
+        method='weighted',
     )
     merged_instances.sort(key=lambda x: x['score'], reverse=True)
     if args.max_instances and args.max_instances > 0:
@@ -711,22 +711,30 @@ def run_production_inference():
     for idx, inst in enumerate(merged_instances):
         if int(inst.get('label', -1)) <= 0 and not bool(args.keep_background):
             continue
+
+        y0, x0 = inst['offset']
+        crop = np.asarray(inst['mask_crop'], dtype=np.uint8)
+        h_c, w_c = crop.shape[:2]
+        
+        global_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
+        y1 = min(orig_h, y0 + h_c)
+        x1 = min(orig_w, x0 + w_c)
+        if y1 > y0 and x1 > x0:
+            global_mask[y0:y1, x0:x1] = crop[:y1-y0, :x1-x0]
+
         polys = regularize_building_polygons(
-            inst['mask_crop'],
+            global_mask,
             epsilon_factor=0.015,
             min_area=max(20, int(args.min_area_px)),
             enforce_ortho=False,
             structural_lines=structural_lines if args.polygon_snap_to_graph else None,
             snap_dist=float(args.graph_snap_dist),
         )
-        y_off, x_off = inst['offset']
 
         for poly in polys:
             global_poly = np.asarray(poly, dtype=np.float32).copy()
             if global_poly.ndim != 3 or global_poly.shape[-1] != 2:
                 continue
-            global_poly[:, 0, 0] += float(x_off)
-            global_poly[:, 0, 1] += float(y_off)
             global_poly[:, 0, 0] = np.clip(global_poly[:, 0, 0], 0, orig_w - 1)
             global_poly[:, 0, 1] = np.clip(global_poly[:, 0, 1], 0, orig_h - 1)
 
