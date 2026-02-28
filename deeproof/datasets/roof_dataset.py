@@ -133,19 +133,31 @@ class DeepRoofDataset(BaseSegDataset):
         if instance_mask is None:
             raise FileNotFoundError(f"Mask not found: {data_info['seg_map_path']}")
         
-        # 3. Load Normal Map
+        # 3. Load Normal Map (skip I/O entirely if file doesn't exist)
         valid_normal = 1.0
-        try:
-            normals = np.load(data_info['normal_path'])
-        except Exception:
-            normals_vis = cv2.imread(data_info['normal_path'].replace('.npy', '.png'))
-            if normals_vis is None:
+        npy_path = data_info['normal_path']
+        png_path = npy_path.replace('.npy', '.png')
+        if osp.isfile(npy_path):
+            try:
+                normals = np.load(npy_path)
+            except Exception:
                 normals = np.zeros_like(img, dtype=np.float32)
-                normals[:,:,2] = 1.0  # UP
+                normals[:,:,2] = 1.0
                 valid_normal = 0.0
-            else:
+        elif osp.isfile(png_path):
+            normals_vis = cv2.imread(png_path)
+            if normals_vis is not None:
                 normals = (normals_vis.astype(np.float32) / 255.0) * 2.0 - 1.0
                 normals = normals[:, :, ::-1]  # BGR to RGB (XYZ)
+            else:
+                normals = np.zeros_like(img, dtype=np.float32)
+                normals[:,:,2] = 1.0
+                valid_normal = 0.0
+        else:
+            # No normals file — use default UP normal, mark invalid
+            normals = np.zeros_like(img, dtype=np.float32)
+            normals[:,:,2] = 1.0  # UP
+            valid_normal = 0.0
 
         # 4. Handle unified semantic labels
         # The unified layout pipeline encodes multiple classes (1: Flat, 2: Sloped, 3: Panel, 4: Obstacle).

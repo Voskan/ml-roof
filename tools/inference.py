@@ -53,6 +53,8 @@ CLASS_NAMES = {
     0: 'background',
     1: 'flat_roof',
     2: 'sloped_roof',
+    3: 'solar_panel',
+    4: 'roof_obstacle',
 }
 
 
@@ -234,6 +236,7 @@ def _score_threshold_for_label(label: int, args) -> float:
         return max(float(args.min_confidence), float(args.min_confidence_sloped))
     if int(label) == 1:
         return max(float(args.min_confidence), float(args.min_confidence_flat))
+    # solar_panel (3) and roof_obstacle (4) use global min_confidence
     return float(args.min_confidence)
 
 
@@ -320,6 +323,8 @@ def draw_visual_overlay(
         0: (120, 120, 120),   # background / unknown
         1: (40, 180, 99),     # flat roof
         2: (255, 159, 67),    # sloped roof
+        3: (52, 152, 219),    # solar panel (blue)
+        4: (231, 76, 60),     # roof obstacle (red)
     }
     for i, poly in enumerate(polygons):
         poly_i32 = to_cv2_poly(poly, round_coords=True)
