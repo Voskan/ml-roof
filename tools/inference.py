@@ -334,7 +334,7 @@ def draw_visual_overlay(
         color = colors.get(class_id, (255, 255, 255))
         if fill_alpha > 0.0:
             cv2.fillPoly(overlay, [poly_i32], color)
-        cv2.polylines(viz, [poly_i32], True, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.polylines(viz, [poly_i32], True, color, 2, cv2.LINE_AA)
     if fill_alpha > 0.0:
         cv2.addWeighted(overlay, fill_alpha, viz, 1.0 - fill_alpha, 0, viz)
     cv2.imwrite(output_path, cv2.cvtColor(viz, cv2.COLOR_RGB2BGR))
