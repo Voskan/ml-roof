@@ -191,7 +191,7 @@ data_root = 'data/MassiveMasterDataset/'
 train_pipeline = []
 
 train_dataloader = dict(
-    batch_size=4, # Samples per GPU (4 GPUs = Total Batch Size 16)
+    batch_size=8, # Samples per GPU (Total Batch Size will be 8 * num_gpus)
     num_workers=8,
     timeout=300,
     persistent_workers=True,
