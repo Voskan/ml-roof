@@ -146,9 +146,9 @@ model = dict(
             loss_weight=2.0,
             reduction='mean',
             # V2 dataset: bg=77%, flat=3.9%, sloped=17%, panel=0.5%, obstacle=1.3%
-            # Weights normalized against sloped (largest FG class):
-            # bg=1, flat=5, sloped=1, panel=36, obstacle=13, no_obj=0.1
-            class_weight=[1.0, 5.0, 1.0, 36.0, 13.0, 0.1]),
+            # Reduced weights to prevent 360:1 ratio exploit that causes false-positive explosion
+            # Original: [1.0, 5.0, 1.0, 36.0, 13.0, 0.1]
+            class_weight=[1.0, 2.0, 1.0, 5.0, 3.0, 0.5]),
         loss_mask=dict(
             type='DeepRoofHybridMaskLoss',
             bce_weight=1.0,
