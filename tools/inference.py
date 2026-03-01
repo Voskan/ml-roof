@@ -707,23 +707,48 @@ def run_production_inference():
 
     final_polygons = []
     final_attributes = []
+    
+    # 1. Paint all instances onto a global canvas using highest score (Painter's Algorithm)
+    global_class_map = np.full((orig_h, orig_w), -1, dtype=np.int32)
+    global_score_map = np.zeros((orig_h, orig_w), dtype=np.float32)
+    
+    # Track the best instance attributes for each flat semantic region
+    # (Since we lose instance identity on the canvas, we store a grid of instance IDs)
+    global_inst_map = np.full((orig_h, orig_w), -1, dtype=np.int32)
 
     for idx, inst in enumerate(merged_instances):
-        if int(inst.get('label', -1)) <= 0 and not bool(args.keep_background):
+        lbl = int(inst.get('label', -1))
+        if lbl <= 0 and not bool(args.keep_background):
             continue
 
         y0, x0 = inst['offset']
         crop = np.asarray(inst['mask_crop'], dtype=np.uint8)
+        score = float(inst.get('score', 0.0))
         h_c, w_c = crop.shape[:2]
         
-        global_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
         y1 = min(orig_h, y0 + h_c)
         x1 = min(orig_w, x0 + w_c)
         if y1 > y0 and x1 > x0:
-            global_mask[y0:y1, x0:x1] = crop[:y1-y0, :x1-x0]
+            mask_region = crop[:y1-y0, :x1-x0] > 0
+            # Only update pixels where the incoming score is higher
+            update_mask = mask_region & (score > global_score_map[y0:y1, x0:x1])
+            
+            global_class_map[y0:y1, x0:x1][update_mask] = lbl
+            global_score_map[y0:y1, x0:x1][update_mask] = score
+            global_inst_map[y0:y1, x0:x1][update_mask] = idx
 
+    # 2. Extract polygons per class to guarantee zero overlaps
+    # We iterate over unique classes found in the global map
+    unique_classes = np.unique(global_class_map)
+    for cls_id in unique_classes:
+        if cls_id <= 0 and not bool(args.keep_background):
+            continue
+            
+        class_mask = (global_class_map == cls_id).astype(np.uint8)
+        
+        # We can extract disconnected polygons natively using the regularize function
         polys = regularize_building_polygons(
-            global_mask,
+            class_mask,
             epsilon_factor=0.015,
             min_area=max(20, int(args.min_area_px)),
             enforce_ortho=False,
@@ -741,6 +766,23 @@ def run_production_inference():
             poly_points = global_poly.reshape(-1, 2)
             if not is_valid_polygon(poly_points, min_area=float(args.min_area_px)):
                 continue
+                
+            poly_i32 = to_cv2_poly(poly_points, round_coords=True)
+            if poly_i32 is None:
+                continue
+
+            # Find which original instance contributed the most pixels to this polygon
+            poly_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
+            cv2.fillPoly(poly_mask, [poly_i32], 1)
+            
+            sub_inst_ids = global_inst_map[poly_mask == 1]
+            sub_inst_ids = sub_inst_ids[sub_inst_ids >= 0]
+            if len(sub_inst_ids) == 0:
+                continue
+            
+            # Majority vote for the original instance ID to inherit its attributes
+            dominant_idx = np.bincount(sub_inst_ids).argmax()
+            inst = merged_instances[dominant_idx]
 
             poly_area = float(cv2.contourArea(to_cv2_poly(poly_points, round_coords=False)))
             geom_conf = _compute_geometry_confidence(
@@ -752,11 +794,11 @@ def run_production_inference():
 
             final_polygons.append(global_poly)
             attr = {
-                'instance_id': idx,
+                'instance_id': int(dominant_idx),
                 'confidence': round(float(inst['score']), 4),
                 'geometry_confidence': round(float(geom_conf), 4),
-                'class_id': int(inst['label']),
-                'class_name': CLASS_NAMES.get(int(inst['label']), f'class_{int(inst["label"])}'),
+                'class_id': int(cls_id),
+                'class_name': CLASS_NAMES.get(int(cls_id), f'class_{int(cls_id)}'),
                 'area_px': round(poly_area, 2),
             }
             if graph is not None:
@@ -770,28 +812,24 @@ def run_production_inference():
                 attr['geometry_source'] = 'query_normal'
 
             if depth_map is not None:
-                poly_i32 = to_cv2_poly(poly_points, round_coords=True)
-                if poly_i32 is not None:
-                    facet_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
-                    cv2.fillPoly(facet_mask, [poly_i32], 1)
-                    pts_xyz = depth_mask_to_points(depth_map=depth_map, mask=facet_mask.astype(bool), xy_scale=1.0)
-                    if pts_xyz.shape[0] >= max(int(args.plane_min_inliers), 3):
-                        _, inliers = fit_plane_ransac(
-                            points_xyz=pts_xyz,
-                            iterations=int(args.plane_ransac_iters),
-                            dist_threshold=float(args.plane_dist_thr),
-                            min_inliers=int(args.plane_min_inliers),
-                            seed=int(args.seed),
-                        )
-                        if inliers.size >= max(int(args.plane_min_inliers), 3):
-                            plane = refine_plane_least_squares(pts_xyz[inliers])
-                            if plane is not None:
-                                n = plane_to_normal(plane)
-                                attr['normal'] = [float(v) for v in n]
-                                attr['slope_deg'] = round(float(get_slope(n)), 2)
-                                attr['azimuth_deg'] = round(float(get_azimuth(n)), 2)
-                                attr['plane_inliers'] = int(inliers.size)
-                                attr['geometry_source'] = 'plane_fit_depth'
+                pts_xyz = depth_mask_to_points(depth_map=depth_map, mask=poly_mask.astype(bool), xy_scale=1.0)
+                if pts_xyz.shape[0] >= max(int(args.plane_min_inliers), 3):
+                    _, inliers = fit_plane_ransac(
+                        points_xyz=pts_xyz,
+                        iterations=int(args.plane_ransac_iters),
+                        dist_threshold=float(args.plane_dist_thr),
+                        min_inliers=int(args.plane_min_inliers),
+                        seed=int(args.seed),
+                    )
+                    if inliers.size >= max(int(args.plane_min_inliers), 3):
+                        plane = refine_plane_least_squares(pts_xyz[inliers])
+                        if plane is not None:
+                            n = plane_to_normal(plane)
+                            attr['normal'] = [float(v) for v in n]
+                            attr['slope_deg'] = round(float(get_slope(n)), 2)
+                            attr['azimuth_deg'] = round(float(get_azimuth(n)), 2)
+                            attr['plane_inliers'] = int(inliers.size)
+                            attr['geometry_source'] = 'plane_fit_depth'
             qa = geometry_qa_flags(
                 poly_points=poly_points,
                 width=orig_w,
