@@ -192,16 +192,54 @@ class DeepRoofDataset(BaseSegDataset):
                 inst_counter += 1
                 instance_mask[bg_mask > 0] = inst_counter
 
-            for cls_id in range(1, 5):  # Background is already handled
-                if cls_id == 3:  # Skip solar panels (already merged into background)
-                    continue
+            # Handle class 1 (Flat Roof), 2 (Sloped Roof), 4 (Obstacle). Class 3 was mapped to 0.
+            for cls_id in [1, 2, 4]:
                 cls_binary = (semantic_mask == cls_id).astype(np.uint8)
                 if cls_binary.max() == 0:
                     continue
-                num_cc, cc_map = cv2.connectedComponents(cls_binary)
-                for cc_id in range(1, num_cc):
-                    inst_counter += 1
-                    instance_mask[cc_map == cc_id] = inst_counter
+                
+                # Critical Fix: Split Sloped Roofs (Class 2) by Azimuth to create Layout/Facet Instances
+                if cls_id == 2 and valid_normal > 0.5:
+                    # Calculate Azimuth from dense normal map: arctan2(y, x)
+                    # normals shape is [H, W, 3] if loaded as numpy, but could be [3, H, W] depending on load path.
+                    # Currently normals is [H, W, 3] at this point before tensor conversion.
+                    if normals.ndim == 3 and normals.shape[2] == 3:
+                        nx = normals[..., 0]
+                        ny = normals[..., 1]
+                    elif normals.ndim == 3 and normals.shape[0] == 3:
+                        nx = normals[0, ...]
+                        ny = normals[1, ...]
+                    else:
+                        nx = np.zeros_like(cls_binary, dtype=np.float32)
+                        ny = np.zeros_like(cls_binary, dtype=np.float32)
+
+                    azimuth_rad = np.arctan2(ny, nx)
+                    # Convert -pi..pi to 0..2pi
+                    azimuth_rad = np.where(azimuth_rad < 0, azimuth_rad + 2 * np.pi, azimuth_rad)
+                    
+                    # Quantize into 8 sectors (45 degrees each)
+                    # Offset by 22.5 deg (pi/8) so that cardinal directions are centered in bins.
+                    bin_size = (2 * np.pi) / 8.0
+                    quantized_azimuth = np.floor((azimuth_rad + (pi_8 := np.pi / 8.0)) / bin_size) % 8
+                    
+                    # Run connected components for each direction separately!
+                    for az_bin in range(8):
+                        # Mask for the current roof class AND current azimuth bin
+                        az_mask = ((quantized_azimuth == az_bin) & (cls_binary > 0)).astype(np.uint8)
+                        
+                        if az_mask.max() == 0:
+                            continue
+                            
+                        num_cc, cc_map = cv2.connectedComponents(az_mask, connectivity=4) # 4-conn to avoid diagonal merging across ridgelines
+                        for cc_id in range(1, num_cc):
+                            inst_counter += 1
+                            instance_mask[cc_map == cc_id] = inst_counter
+                else:
+                    # Flat roofs (1) and Obstacles (4) don't have distinct slopes, just use standard CC.
+                    num_cc, cc_map = cv2.connectedComponents(cls_binary, connectivity=8)
+                    for cc_id in range(1, num_cc):
+                        inst_counter += 1
+                        instance_mask[cc_map == cc_id] = inst_counter
 
         # Optional SAM teacher mask for distillation
         sam_mask = None
