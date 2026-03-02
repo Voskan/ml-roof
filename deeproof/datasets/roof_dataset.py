@@ -185,8 +185,14 @@ class DeepRoofDataset(BaseSegDataset):
             # This prevents adjacent pixels of different classes from merging.
             inst_counter = 0
             instance_mask = np.zeros_like(semantic_mask, dtype=np.int32)
+            
+            # Add Background (0) as a single connected instance (stuff)
+            bg_mask = (semantic_mask == 0).astype(np.uint8)
+            if bg_mask.max() > 0:
+                inst_counter += 1
+                instance_mask[bg_mask > 0] = inst_counter
 
-            for cls_id in range(1, 5):  # Skip background (0)
+            for cls_id in range(1, 5):  # Background is already handled
                 if cls_id == 3:  # Skip solar panels (already merged into background)
                     continue
                 cls_binary = (semantic_mask == cls_id).astype(np.uint8)
