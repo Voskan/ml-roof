@@ -177,11 +177,24 @@ class DeepRoofDataset(BaseSegDataset):
         else:
             # Unified 5-class mode natively holds semantic IDs in the loaded mask directly
             semantic_mask = instance_mask.copy().astype(np.uint8)
+            
+            # Map Solar Panels (class 3) to Background (class 0)
+            semantic_mask[semantic_mask == 3] = 0
+            
             # Per-class connected components: each class produces separate instances.
             # This prevents adjacent pixels of different classes from merging.
             inst_counter = 0
             instance_mask = np.zeros_like(semantic_mask, dtype=np.int32)
-            for cls_id in range(1, 5):  # Skip background (0)
+            
+            # Add Background (0) as a single connected instance (stuff)
+            bg_mask = (semantic_mask == 0).astype(np.uint8)
+            if bg_mask.max() > 0:
+                inst_counter += 1
+                instance_mask[bg_mask > 0] = inst_counter
+
+            for cls_id in range(1, 5):  # Background is already handled
+                if cls_id == 3:  # Skip solar panels (already merged into background)
+                    continue
                 cls_binary = (semantic_mask == cls_id).astype(np.uint8)
                 if cls_binary.max() == 0:
                     continue
