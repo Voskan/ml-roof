@@ -1,8 +1,33 @@
 
+import math
+from contextlib import nullcontext
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mmseg.registry import MODELS
+
+
+def _sanitize_avg_factor(avg_factor):
+    """Convert avg_factor to a finite positive float, or return None."""
+    if avg_factor is None:
+        return None
+    try:
+        if torch.is_tensor(avg_factor):
+            af = avg_factor.detach()
+            if af.numel() == 0:
+                return None
+            # fp16 scalars can overflow to inf under AMP; cast before extraction.
+            af = af.float().reshape(-1).mean()
+            af = float(af.item())
+        else:
+            af = float(avg_factor)
+    except Exception:
+        return None
+
+    if (not math.isfinite(af)) or af <= 0.0:
+        return None
+    return max(af, 1e-12)
 
 
 def _weight_reduce_loss(loss, weight=None, reduction='mean', avg_factor=None):
@@ -25,9 +50,13 @@ def _weight_reduce_loss(loss, weight=None, reduction='mean', avg_factor=None):
             return loss.sum()
         raise ValueError(f'Unsupported reduction={reduction}')
 
-    if torch.is_tensor(avg_factor):
-        avg_factor = float(avg_factor.detach().item())
-    avg_factor = max(float(avg_factor), 1e-12)
+    avg_factor = _sanitize_avg_factor(avg_factor)
+    if avg_factor is None:
+        if reduction == 'mean':
+            return loss.mean()
+        if reduction == 'sum':
+            return loss.sum()
+        raise ValueError(f'Unsupported reduction={reduction}')
 
     if reduction == 'mean':
         return loss.sum() / avg_factor
@@ -210,32 +239,44 @@ class HybridMaskLoss(nn.Module):
             raise ValueError(f'Invalid reduction_override={reduction_override}')
         self._debug_call_idx += 1
 
+        safe_avg_factor = _sanitize_avg_factor(avg_factor)
+
         if target.shape != pred.shape:
             target = target.reshape_as(pred)
         target = target.float()
 
-        # Keep per-point BCE values so external `avg_factor` (from Mask2Former)
-        # correctly normalizes by (num_masks * num_points) exactly once.
-        bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-
-        # Mask2Former may pass sampled mask logits as a single flattened 1D tensor
-        # [num_masks * num_points]. Treat that as one sample, not N scalar samples.
-        if pred.ndim == 0:
-            pred_flat = pred.reshape(1, 1)
-            target_flat = target.reshape(1, 1)
-        elif pred.ndim == 1:
-            pred_flat = pred.unsqueeze(0)
-            target_flat = target.unsqueeze(0)
-        elif pred.ndim == 2:
-            pred_flat = pred
-            target_flat = target
+        # Keep this loss in FP32 under AMP to avoid numeric instability on
+        # large sampled-point tensors.
+        if torch.is_tensor(pred) and pred.is_cuda:
+            amp_ctx = torch.autocast(device_type='cuda', enabled=False)
         else:
-            pred_flat = pred.reshape(pred.shape[0], -1)
-            target_flat = target.reshape(target.shape[0], -1)
-        lovasz_vals = []
-        for i in range(pred_flat.shape[0]):
-            lovasz_vals.append(_lovasz_hinge_flat(pred_flat[i], target_flat[i]))
-        lovasz = torch.stack(lovasz_vals) if lovasz_vals else pred.sum() * 0.0
+            amp_ctx = nullcontext()
+
+        with amp_ctx:
+            pred_fp32 = pred.float()
+            target_fp32 = target.float()
+            # Keep per-point BCE values so external `avg_factor` (from Mask2Former)
+            # can be analyzed/debugged even when not applied directly.
+            bce = F.binary_cross_entropy_with_logits(pred_fp32, target_fp32, reduction='none')
+
+            # Mask2Former may pass sampled mask logits as a single flattened 1D tensor
+            # [num_masks * num_points]. Treat that as one sample, not N scalar samples.
+            if pred_fp32.ndim == 0:
+                pred_flat = pred_fp32.reshape(1, 1)
+                target_flat = target_fp32.reshape(1, 1)
+            elif pred_fp32.ndim == 1:
+                pred_flat = pred_fp32.unsqueeze(0)
+                target_flat = target_fp32.unsqueeze(0)
+            elif pred_fp32.ndim == 2:
+                pred_flat = pred_fp32
+                target_flat = target_fp32
+            else:
+                pred_flat = pred_fp32.reshape(pred_fp32.shape[0], -1)
+                target_flat = target_fp32.reshape(target_fp32.shape[0], -1)
+            lovasz_vals = []
+            for i in range(pred_flat.shape[0]):
+                lovasz_vals.append(_lovasz_hinge_flat(pred_flat[i], target_flat[i]))
+            lovasz = torch.stack(lovasz_vals) if lovasz_vals else pred_fp32.sum() * 0.0
 
         if self._debug_call_idx <= self.debug_first_n_calls:
             try:
@@ -246,7 +287,7 @@ class HybridMaskLoss(nn.Module):
                     f'call={self._debug_call_idx} '
                     f'pred_shape={tuple(pred.shape)} target_shape={tuple(target.shape)} '
                     f'numel={int(pred.numel())} reduction={reduction} '
-                    f'avg_factor={avg_factor} '
+                    f'avg_factor_raw={avg_factor} avg_factor_safe={safe_avg_factor} '
                     f'bce_mean={bce_mean:.8e} lovasz_mean={lovasz_mean:.8e}',
                     flush=True)
             except Exception:
@@ -311,9 +352,9 @@ class HybridMaskLoss(nn.Module):
                 print(
                     '[DeepRoofHybridMaskLoss][debug] '
                     f'call={self._debug_call_idx} '
-                    f'bce_term={float(bce_term):.8e} '
-                    f'lovasz_term={float(lovasz_term):.8e} '
-                    f'final={float(loss * self.loss_weight):.8e}',
+                    f'bce_term={float(bce_term.detach().item()):.8e} '
+                    f'lovasz_term={float(lovasz_term.detach().item()):.8e} '
+                    f'final={float((loss * self.loss_weight).detach().item()):.8e}',
                     flush=True)
             except Exception:
                 pass
