@@ -107,6 +107,7 @@ class DeepRoofMask2Former(Mask2FormerBase):
             self.sam_distill_loss = None
         self.sam_distill_weight = float(sam_distill_weight)
         self._warned_missing_assign_cache = False
+        self._warned_no_geometry_supervision = False
         self.geometry_fallback_mask_size = max(int(geometry_fallback_mask_size), 16)
         self.max_geometry_fallback_assign_elems = max(int(max_geometry_fallback_assign_elems), 1_000_000)
 
@@ -965,7 +966,15 @@ class DeepRoofMask2Former(Mask2FormerBase):
 
         # D. Query-geometry prediction/loss
         geo_loss = all_cls_scores[0].sum() * 0.0
-        if hasattr(self.decode_head, 'last_query_embeddings'):
+        has_geometry_supervision = self.geometry_loss_weight > 0.0
+        if has_geometry_supervision:
+            has_geometry_supervision = False
+            for sample in data_samples:
+                valid_normal = float(self._safe_get_metainfo(sample, 'valid_normal', 1.0))
+                if valid_normal > 0.0:
+                    has_geometry_supervision = True
+                    break
+        if has_geometry_supervision and hasattr(self.decode_head, 'last_query_embeddings'):
             query_embeddings = self._normalize_query_embeddings(
                 getattr(self.decode_head, 'last_query_embeddings', None),
                 batch_size=len(data_samples),
@@ -980,6 +989,13 @@ class DeepRoofMask2Former(Mask2FormerBase):
                     data_samples=data_samples,
                     device=inputs.device,
                 )
+        elif self.geometry_loss_weight > 0.0 and (not self._warned_no_geometry_supervision):
+            print(
+                '[DeepRoofGeometry] INFO: geometry supervision is unavailable '
+                '(no valid normal maps in current batches); skipping geometry branch.',
+                flush=True,
+            )
+            self._warned_no_geometry_supervision = True
         losses['loss_geometry'] = geo_loss
 
         # E. Dense normal branch (optional)
