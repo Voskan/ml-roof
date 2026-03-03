@@ -78,6 +78,18 @@ def _scores_to_numpy(instance_obj, default_count: int) -> np.ndarray:
     return scores
 
 
+def _labels_to_numpy(instance_obj, default_count: int) -> np.ndarray:
+    labels = _get_field(instance_obj, 'labels')
+    if labels is None:
+        return np.zeros((default_count,), dtype=np.int64)
+    if torch.is_tensor(labels):
+        labels = labels.detach().cpu().numpy()
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    if labels.size != default_count:
+        return np.zeros((default_count,), dtype=np.int64)
+    return labels
+
+
 def _pairwise_iou(pred_masks: np.ndarray, gt_masks: np.ndarray) -> np.ndarray:
     n_pred = pred_masks.shape[0]
     n_gt = gt_masks.shape[0]
@@ -172,8 +184,24 @@ class DeepRoofFacetMetric(BaseMetric):
             pred_masks = _masks_to_numpy(pred_inst)
             gt_masks = _masks_to_numpy(gt_inst)
             pred_scores = _scores_to_numpy(pred_inst, default_count=pred_masks.shape[0])
+            pred_labels = _labels_to_numpy(pred_inst, default_count=pred_masks.shape[0])
+            gt_labels = _labels_to_numpy(gt_inst, default_count=gt_masks.shape[0])
+
+            # Foreground-only facet evaluation. Ignore label 0 (background/stuff).
+            if pred_masks.shape[0] > 0:
+                keep = pred_labels > 0
+                pred_masks = pred_masks[keep]
+                pred_scores = pred_scores[keep]
+                pred_labels = pred_labels[keep]
+            if gt_masks.shape[0] > 0:
+                keep = gt_labels > 0
+                gt_masks = gt_masks[keep]
+                gt_labels = gt_labels[keep]
 
             iou_mat = _pairwise_iou(pred_masks, gt_masks)
+            if iou_mat.size > 0 and pred_labels.size > 0 and gt_labels.size > 0:
+                class_mismatch = pred_labels[:, None] != gt_labels[None, :]
+                iou_mat[class_mismatch] = 0.0
 
             p50, r50 = _greedy_ap(iou_mat, pred_scores, threshold=0.50)
             p75, r75 = _greedy_ap(iou_mat, pred_scores, threshold=0.75)

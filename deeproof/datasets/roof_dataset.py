@@ -160,7 +160,7 @@ class DeepRoofDataset(BaseSegDataset):
             valid_normal = 0.0
 
         # 4. Handle unified semantic labels
-        # The unified layout pipeline encodes multiple classes (1: Flat, 2: Sloped, 3: Panel, 4: Obstacle).
+        # Unified mask classes: 0=BG, 1=Flat, 2=Sloped, 3=Panel, 4=Obstacle.
         # We only override with geometry-based (slope) logic if the mask is purely binary (legacy 0/1 data).
         unique_vals = np.unique(instance_mask)
         if len(unique_vals) <= 2 and unique_vals.max() <= 1:
@@ -177,23 +177,14 @@ class DeepRoofDataset(BaseSegDataset):
         else:
             # Unified 5-class mode natively holds semantic IDs in the loaded mask directly
             semantic_mask = instance_mask.copy().astype(np.uint8)
-            
-            # Map Solar Panels (class 3) to Background (class 0)
-            semantic_mask[semantic_mask == 3] = 0
-            
+
             # Per-class connected components: each class produces separate instances.
             # This prevents adjacent pixels of different classes from merging.
             inst_counter = 0
             instance_mask = np.zeros_like(semantic_mask, dtype=np.int32)
-            
-            # Add Background (0) as a single connected instance (stuff)
-            bg_mask = (semantic_mask == 0).astype(np.uint8)
-            if bg_mask.max() > 0:
-                inst_counter += 1
-                instance_mask[bg_mask > 0] = inst_counter
 
-            # Handle class 1 (Flat Roof), 2 (Sloped Roof), 4 (Obstacle). Class 3 was mapped to 0.
-            for cls_id in [1, 2, 4]:
+            # Foreground instance classes only. Background stays id=0.
+            for cls_id in [1, 2, 3, 4]:
                 cls_binary = (semantic_mask == cls_id).astype(np.uint8)
                 if cls_binary.max() == 0:
                     continue
@@ -235,7 +226,7 @@ class DeepRoofDataset(BaseSegDataset):
                             inst_counter += 1
                             instance_mask[cc_map == cc_id] = inst_counter
                 else:
-                    # Flat roofs (1) and Obstacles (4) don't have distinct slopes, just use standard CC.
+                    # Flat roofs, panels, and obstacles use standard connected components.
                     num_cc, cc_map = cv2.connectedComponents(cls_binary, connectivity=8)
                     for cc_id in range(1, num_cc):
                         inst_counter += 1

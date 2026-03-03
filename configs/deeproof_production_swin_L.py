@@ -145,11 +145,9 @@ model = dict(
             use_sigmoid=False,
             loss_weight=2.0,
             reduction='mean',
-            # V2 dataset: bg=77%, flat=3.9%, sloped=17%, panel=0.5%, obstacle=1.3%
-            # Restore standard class weights; heavily penalizing no_object paralyzes Mask2Former.
-            # Solar panel (index 3) is mapped to background, so weight is 0.0.
-            # no_object (index 5) is set to 0.1 (Mask2Former default)
-            class_weight=[1.0, 5.0, 1.0, 0.0, 13.0, 0.1]),
+            # Foreground-only instances: keep higher weights on minority classes.
+            # no_object (index 5) stays at 0.1 (Mask2Former default).
+            class_weight=[1.0, 5.0, 1.0, 9.0, 10.0, 0.1]),
         loss_mask=dict(
             type='DeepRoofHybridMaskLoss',
             bce_weight=1.0,
@@ -314,7 +312,7 @@ param_scheduler = [
 ]
 
 # 4. Runtime Config
-train_cfg = dict(type='IterBasedTrainLoop', max_iters=100000, val_interval=5000)
+train_cfg = dict(type='IterBasedTrainLoop', max_iters=100000, val_interval=2000)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 custom_hooks = [
@@ -329,7 +327,7 @@ default_hooks = dict(
     checkpoint=dict(
         type='CheckpointHook',
         by_epoch=False,
-        interval=5000,
+        interval=2000,
         max_keep_ckpts=3,
         save_best='facet/AP50',
         rule='greater',

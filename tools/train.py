@@ -17,7 +17,8 @@ from deeproof.utils.runtime_compat import apply_runtime_compat
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train DeepRoof-2026 Model')
-    parser.add_argument('config', help='train config file path')
+    parser.add_argument('config', nargs='?', help='train config file path (positional, legacy)')
+    parser.add_argument('--config', dest='config_opt', default='', help='train config file path')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument(
         '--resume',
@@ -61,7 +62,24 @@ def parse_args():
         type=int,
         default=1,
         help='Repeat factor for hard samples (>=1)')
+    parser.add_argument(
+        '--gpus',
+        type=int,
+        default=1,
+        help='Deprecated compatibility flag. Use torchrun/launcher for true multi-GPU.')
     args = parser.parse_args()
+    cfg_pos = args.config
+    cfg_opt = args.config_opt
+    if cfg_pos and cfg_opt and cfg_pos != cfg_opt:
+        parser.error(f'Conflicting config paths: positional={cfg_pos}, --config={cfg_opt}')
+    args.config = cfg_opt or cfg_pos
+    if not args.config:
+        parser.error('Config path is required. Pass positional `config` or `--config`.')
+    if int(getattr(args, 'gpus', 1)) > 1 and args.launcher == 'none':
+        print(
+            '[train.py] WARNING: --gpus is compatibility-only and does not enable '
+            'distributed training. Use torchrun with --launcher pytorch for multi-GPU.'
+        )
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
     return args

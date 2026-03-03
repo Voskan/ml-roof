@@ -144,8 +144,8 @@ python tests/test_geometry_gradient.py
 - Project: `DeepRoof-2026`
 - Segmentor: `DeepRoofMask2Former`
 - Backbone: `Swin Transformer V2-Large`
-- Classes: `3`
-- TODO progress: `done=40`, `open=0`
+- Classes: `5`
+- TODO progress: `done=5`, `open=1`
 
 | KPI | Target |
 | --- | --- |
@@ -156,7 +156,7 @@ python tests/test_geometry_gradient.py
 | Azimuth MAE (deg) | <= 7.0 |
 
 **Canonical Commands**
-- Train: `python tools/train.py --config configs/deeproof_production_swin_L.py`
+- Train: `python tools/train.py configs/deeproof_production_swin_L.py --amp`
 - Inference: `python tools/inference.py --config configs/deeproof_production_swin_L.py --checkpoint work_dirs/deeproof_absolute_ideal_v1/iter_15000.pth --input /path/to/image.tif --output /path/to/result.geojson`
 - Performance profile: `python tools/perf_profile.py --config configs/deeproof_production_swin_L.py --checkpoint /path/to/model.pth --input /path/to/image.png --mode balanced --runs 10`
 - Model registry gate: `python tools/model_registry.py --checkpoint /path/to/model.pth --metrics-json /path/to/metrics.json`
