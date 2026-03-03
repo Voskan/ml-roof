@@ -419,8 +419,8 @@ class DeepRoofDataset(BaseSegDataset):
 
         gt_instances = InstanceData()
         inst_ids, inst_areas = torch.unique(inst_map, return_counts=True)
-        # Instance supervision should contain object instances only.
-        # Background is learned from unmatched/no-object queries and semantic targets.
+        # Foreground connected components from instance map.
+        # Background (class 0) is injected as a single semantic pseudo-instance below.
         keep_fg = inst_ids > 0
         inst_ids = inst_ids[keep_fg]
         inst_areas = inst_areas[keep_fg]
@@ -450,8 +450,6 @@ class DeepRoofDataset(BaseSegDataset):
                     label = 1
                 else:
                     cls_ids, counts = torch.unique(sem_vals, return_counts=True)
-                    # If this instance is purely background, it will simply take class 0.
-                    # Otherwise, assign it the majority foreground class.
                     fg = cls_ids > 0
                     if fg.any():
                         fg_cls_ids = cls_ids[fg]
@@ -462,8 +460,6 @@ class DeepRoofDataset(BaseSegDataset):
                 labels.append(label)
 
                 if label == 0:
-                    # Background doesn't have a valid surface normal. 
-                    # Default to pointing straight up (0, 0, 1)
                     avg_n = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32, device=normal_tensor.device)
                 else:
                     avg_n = normal_tensor[:, m].mean(dim=1)
@@ -476,6 +472,21 @@ class DeepRoofDataset(BaseSegDataset):
             masks = torch.zeros((0, H, W), dtype=torch.bool)
             labels = torch.zeros((0,), dtype=torch.long)
             normals_inst = torch.zeros((0, 3), dtype=torch.float32)
+
+        # Add a single background pseudo-instance so class 0 gets direct supervision.
+        bg_mask = (sem_map == 0)
+        if int(bg_mask.sum().item()) >= min_inst_area:
+            bg_mask = bg_mask.unsqueeze(0).bool()
+            bg_label = torch.tensor([0], dtype=torch.long)
+            bg_normal = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+            if masks.numel() == 0:
+                masks = bg_mask
+                labels = bg_label
+                normals_inst = bg_normal
+            else:
+                masks = torch.cat([masks, bg_mask], dim=0)
+                labels = torch.cat([labels, bg_label], dim=0)
+                normals_inst = torch.cat([normals_inst, bg_normal], dim=0)
 
         gt_instances.masks = masks
         gt_instances.labels = labels
