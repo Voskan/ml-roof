@@ -159,6 +159,7 @@ model = dict(
             bce_weight=1.0,
             lovasz_weight=1.0,
             loss_weight=5.0,
+            debug_first_n_calls=0,
             reduction='mean'),
         loss_dice=dict(
             type='DeepRoofDiceBoundaryLoss',
