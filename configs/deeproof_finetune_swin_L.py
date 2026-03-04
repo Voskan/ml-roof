@@ -25,8 +25,10 @@ optimizer = dict(
 
 optim_wrapper = dict(
     _delete_=True, # Overwrite production wrapper
-    type='OptimWrapper',
+    type='DeepRoofSafeOptimWrapper',
     optimizer=optimizer,
+    skip_nonfinite_grad=True,
+    max_nonfinite_warnings=20,
     # Keep gradient clipping consistent with production/scratch profiles.
     clip_grad=dict(max_norm=1.0, norm_type=2)
 )

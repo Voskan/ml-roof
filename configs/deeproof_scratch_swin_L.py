@@ -26,8 +26,10 @@ optimizer = dict(
 
 optim_wrapper = dict(
     _delete_=True,
-    type='OptimWrapper',
+    type='DeepRoofSafeOptimWrapper',
     optimizer=optimizer,
+    skip_nonfinite_grad=True,
+    max_nonfinite_warnings=20,
     # FIX Bug #1: max_norm=0.01 was 100x too small — completely killed geometry gradients.
     # Standard Mask2Former / mmdet value is 1.0.
     # At 0.01 the effective LR for geometry was ~0.0000001, causing full class collapse.

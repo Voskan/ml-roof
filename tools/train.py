@@ -258,9 +258,25 @@ def _required_state_prefixes_from_cfg(cfg: Config) -> list[str]:
     return prefixes
 
 
-def _checkpoint_has_required_prefixes(ckpt_path: Path, required_prefixes: list[str]) -> bool:
-    if not required_prefixes:
-        return True
+def _forbidden_state_prefixes_from_cfg(cfg: Config) -> list[str]:
+    prefixes: list[str] = []
+    model = cfg.get('model', None)
+    if not isinstance(model, dict):
+        return prefixes
+    if model.get('geometry_head', None) is None:
+        prefixes.append('geometry_head.')
+    if model.get('dense_geometry_head', None) is None:
+        prefixes.append('dense_geometry_head.')
+    if model.get('edge_head', None) is None:
+        prefixes.append('edge_head.')
+    return prefixes
+
+
+def _checkpoint_has_required_prefixes(
+    ckpt_path: Path,
+    required_prefixes: list[str],
+    forbidden_prefixes: list[str] | None = None,
+) -> bool:
     try:
         ckpt_obj = _safe_torch_load(ckpt_path)
     except Exception:
@@ -271,6 +287,11 @@ def _checkpoint_has_required_prefixes(ckpt_path: Path, required_prefixes: list[s
     if not isinstance(state_dict, dict):
         return False
     keys = tuple(state_dict.keys())
+    if forbidden_prefixes:
+        if any(any(k.startswith(prefix) for k in keys) for prefix in forbidden_prefixes):
+            return False
+    if not required_prefixes:
+        return True
     return all(any(k.startswith(prefix) for k in keys) for prefix in required_prefixes)
 
 
@@ -284,7 +305,8 @@ def _apply_safe_resume_fallback(cfg: Config, resume_requested: bool):
     if last_ckpt is None:
         return
     required_prefixes = _required_state_prefixes_from_cfg(cfg)
-    if _checkpoint_has_required_prefixes(last_ckpt, required_prefixes):
+    forbidden_prefixes = _forbidden_state_prefixes_from_cfg(cfg)
+    if _checkpoint_has_required_prefixes(last_ckpt, required_prefixes, forbidden_prefixes):
         return
     # Incompatible architecture for full resume: skip checkpoint loading.
     # This avoids partial loads where new heads start randomly while older
@@ -313,6 +335,7 @@ def main():
     import deeproof.models.heads.dense_normal_head
     import deeproof.models.heads.edge_head
     import deeproof.models.losses
+    import deeproof.optim.safe_optim_wrapper
     import deeproof.datasets.roof_dataset
 
     _set_global_seed(seed=args.seed, deterministic=args.deterministic)
@@ -333,7 +356,11 @@ def main():
 
     # Enable AMP
     if args.amp:
-        cfg.optim_wrapper.type = 'AmpOptimWrapper'
+        wrapper_type = str(cfg.optim_wrapper.get('type', 'OptimWrapper'))
+        if wrapper_type == 'DeepRoofSafeOptimWrapper':
+            cfg.optim_wrapper.type = 'DeepRoofSafeAmpOptimWrapper'
+        else:
+            cfg.optim_wrapper.type = 'AmpOptimWrapper'
         cfg.optim_wrapper.loss_scale = 'dynamic'
 
     # Resume training

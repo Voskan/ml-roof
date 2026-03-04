@@ -37,7 +37,7 @@ class DeepRoofMask2Former(Mask2FormerBase):
     - Heads: Instance Mask, Classification, and Geometry (Surface Normals).
 
     Fixes applied in this version:
-    - Bug #1: clip_grad now at max_norm=1.0 (in config, not model code)
+    - Geometry branch can be disabled cleanly when normal-map supervision is absent.
     - Bug #3: GeometryHead now uses real per-image decoder output embeddings,
               not static learnable weights that are identical for every image.
     - Bug #5: Geometry supervision reuses Hungarian matching from decode_head
@@ -45,7 +45,7 @@ class DeepRoofMask2Former(Mask2FormerBase):
     """
 
     def __init__(self,
-                 geometry_head: dict,
+                 geometry_head: Optional[dict] = None,
                  geometry_loss: Optional[dict] = None,
                  geometry_loss_weight: float = 2.0,
                  geometry_fallback_mask_size: int = 64,
@@ -64,16 +64,21 @@ class DeepRoofMask2Former(Mask2FormerBase):
         super().__init__(**kwargs)
         self.test_cfg = self._normalize_test_cfg(getattr(self, 'test_cfg', None))
 
-        # 1. Initialize Geometry Head (MLP that takes query embeddings)
-        self.geometry_head = MODELS.build(geometry_head)
-
-        # 2. Define Geometry Loss (SOTA Refinement)
-        if geometry_loss is not None:
-             self.geometry_loss = MODELS.build(geometry_loss)
-             self.geometry_loss_weight = geometry_loss.get('loss_weight', 1.0)
+        # 1) Optional geometry branch.
+        # If geometry supervision is disabled (weight <= 0) or head config is
+        # omitted, do not build geometry modules to avoid dead compute paths.
+        if geometry_head is not None and float(geometry_loss_weight) > 0.0:
+            self.geometry_head = MODELS.build(geometry_head)
+            if geometry_loss is not None:
+                self.geometry_loss = MODELS.build(geometry_loss)
+                self.geometry_loss_weight = float(geometry_loss.get('loss_weight', 1.0))
+            else:
+                self.geometry_loss = CosineSimilarityLoss(loss_weight=geometry_loss_weight)
+                self.geometry_loss_weight = float(geometry_loss_weight)
         else:
-             self.geometry_loss = CosineSimilarityLoss(loss_weight=geometry_loss_weight)
-             self.geometry_loss_weight = geometry_loss_weight
+            self.geometry_head = None
+            self.geometry_loss = None
+            self.geometry_loss_weight = 0.0
         self.topology_loss_weight = float(topology_loss_weight)
 
         self.dense_geometry_head = MODELS.build(dense_geometry_head) if dense_geometry_head is not None else None
@@ -131,6 +136,8 @@ class DeepRoofMask2Former(Mask2FormerBase):
         return test_cfg
 
     def _geometry_embed_dim(self) -> int:
+        if self.geometry_head is None:
+            return 0
         if hasattr(self.geometry_head, 'embed_dims'):
             return int(self.geometry_head.embed_dims)
         for module in self.geometry_head.modules():
@@ -1054,7 +1061,11 @@ class DeepRoofMask2Former(Mask2FormerBase):
 
         # D. Query-geometry prediction/loss
         geo_loss = all_cls_scores[0].sum() * 0.0
-        has_geometry_supervision = self.geometry_loss_weight > 0.0
+        has_geometry_supervision = (
+            self.geometry_head is not None
+            and self.geometry_loss is not None
+            and self.geometry_loss_weight > 0.0
+        )
         if has_geometry_supervision:
             has_geometry_supervision = False
             for sample in data_samples:
@@ -1077,7 +1088,11 @@ class DeepRoofMask2Former(Mask2FormerBase):
                     data_samples=data_samples,
                     device=inputs.device,
                 )
-        elif self.geometry_loss_weight > 0.0 and (not self._warned_no_geometry_supervision):
+        elif (
+            self.geometry_head is not None
+            and self.geometry_loss_weight > 0.0
+            and (not self._warned_no_geometry_supervision)
+        ):
             print(
                 '[DeepRoofGeometry] INFO: geometry supervision is unavailable '
                 '(no valid normal maps in current batches); skipping geometry branch.',
@@ -1232,7 +1247,7 @@ class DeepRoofMask2Former(Mask2FormerBase):
 
         # Attach geometry predictions using cached query embeddings
         query_cache = getattr(self.decode_head, 'last_query_embeddings', None)
-        if query_cache is not None:
+        if self.geometry_head is not None and query_cache is not None:
             query_embeddings = self._normalize_query_embeddings(
                 query_cache,
                 batch_size=len(data_samples),

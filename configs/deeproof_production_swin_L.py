@@ -16,6 +16,7 @@ custom_imports = dict(
         'deeproof.models.deeproof_model',
         'deeproof.models.heads.geometry_head',
         'deeproof.models.losses',
+        'deeproof.optim.safe_optim_wrapper',
         'deeproof.evaluation.metrics',
         'deeproof.hooks.progress_hook',
     ],
@@ -45,43 +46,16 @@ model = dict(
         max_instances=120,
     ),
 
-    # Custom Geometry Head
-    geometry_head=dict(
-        type='GeometryHead',
-        embed_dims=256,
-        num_layers=3,
-        hidden_dims=256
-    ),
-
-    # Absolute Ideal: Use PhysicallyWeightedNormalLoss
-    geometry_loss=dict(
-        type='PhysicallyWeightedNormalLoss',
-        loss_weight=2.0,
-        azimuth_weight=1.5  # Heavy focus on slope-aware azimuth
-    ),
-    dense_geometry_head=dict(
-        type='DenseNormalHead',
-        in_channels=192,
-        hidden_channels=128,
-        feat_index=0,
-        num_convs=2,
-    ),
-    dense_normal_loss=dict(
-        type='DeepRoofDenseNormalLoss',
-        angular_weight=1.0,
-        l1_weight=0.5,
-        loss_weight=1.0,
-    ),
-    dense_geometry_loss_weight=0.0,  # No normal maps in MassiveMasterDataset
+    # MassiveMasterDataset has no reliable normal maps.
+    # Disable geometry branches completely to avoid dead/random supervision paths.
+    geometry_head=None,
+    geometry_loss=None,
+    geometry_loss_weight=0.0,
+    dense_geometry_head=None,
+    dense_normal_loss=None,
+    dense_geometry_loss_weight=0.0,
     piecewise_planar_loss_weight=0.0,
-    edge_head=dict(
-        type='RoofEdgeHead',
-        in_channels=192,
-        hidden_channels=96,
-        feat_index=0,
-        num_layers=2,
-        out_channels=1,
-    ),
+    edge_head=None,
     edge_loss_weight=0.0,  # No edge GT in MassiveMasterDataset
     sam_distill_weight=0.0,  # No SAM masks in MassiveMasterDataset
     topology_loss_weight=0.0,  # Disable until core segmentation converges
@@ -293,8 +267,10 @@ optimizer = dict(
 )
 
 optim_wrapper = dict(
-    type='OptimWrapper',
+    type='DeepRoofSafeOptimWrapper',
     optimizer=optimizer,
+    skip_nonfinite_grad=True,
+    max_nonfinite_warnings=20,
     # FIX Bug #1 (production): max_norm=0.01 is the standard for Mask2Former.
     # 1.0 allows gradients to explode during bipartite matching.
     clip_grad=dict(max_norm=0.01, norm_type=2),
