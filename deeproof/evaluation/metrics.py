@@ -168,11 +168,17 @@ class DeepRoofFacetMetric(BaseMetric):
     def __init__(
         self,
         overlap_threshold: float = 0.30,
+        score_thr: float = 0.20,
+        min_area: int = 64,
+        max_dets: int = 120,
         collect_device: str = 'cpu',
         prefix: str = None,
     ):
         super().__init__(collect_device=collect_device, prefix=prefix)
         self.overlap_threshold = float(overlap_threshold)
+        self.score_thr = float(score_thr)
+        self.min_area = max(int(min_area), 0)
+        self.max_dets = int(max_dets)
 
     def process(self, data_batch: dict, data_samples: List[dict]) -> None:
         for sample in data_samples:
@@ -193,6 +199,17 @@ class DeepRoofFacetMetric(BaseMetric):
                 pred_masks = pred_masks[keep]
                 pred_scores = pred_scores[keep]
                 pred_labels = pred_labels[keep]
+                if pred_masks.shape[0] > 0:
+                    pred_areas = pred_masks.reshape(pred_masks.shape[0], -1).sum(axis=1)
+                    keep = (pred_scores >= self.score_thr) & (pred_areas >= self.min_area)
+                    pred_masks = pred_masks[keep]
+                    pred_scores = pred_scores[keep]
+                    pred_labels = pred_labels[keep]
+                if pred_masks.shape[0] > 0 and self.max_dets > 0 and pred_masks.shape[0] > self.max_dets:
+                    order = np.argsort(-pred_scores)[: self.max_dets]
+                    pred_masks = pred_masks[order]
+                    pred_scores = pred_scores[order]
+                    pred_labels = pred_labels[order]
             if gt_masks.shape[0] > 0:
                 keep = gt_labels > 0
                 gt_masks = gt_masks[keep]

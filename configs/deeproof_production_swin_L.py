@@ -37,7 +37,13 @@ data_preprocessor = dict(
 model = dict(
     type='DeepRoofMask2Former', # Our Multi-Task Model
     data_preprocessor=data_preprocessor,
-    test_cfg=dict(mode='whole'),
+    test_cfg=dict(
+        mode='whole',
+        # Filter noisy low-confidence query instances during eval/inference.
+        instance_score_thr=0.20,
+        instance_min_area=64,
+        max_instances=120,
+    ),
 
     # Custom Geometry Head
     geometry_head=dict(
@@ -250,6 +256,7 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file='val.txt',
+        test_mode=True,  # Prevent train-time random augmentations in validation.
         img_suffix='.jpg',
         seg_map_suffix='.png',
         normal_suffix='.npy',
@@ -264,7 +271,13 @@ val_dataloader = dict(
 val_evaluator = [
     dict(type='IoUMetric', iou_metrics=['mIoU'], prefix=''),
     dict(type='DeepRoofBoundaryMetric', tolerance=1),
-    dict(type='DeepRoofFacetMetric', overlap_threshold=0.30),
+    dict(
+        type='DeepRoofFacetMetric',
+        overlap_threshold=0.30,
+        score_thr=0.20,
+        min_area=64,
+        max_dets=120,
+    ),
 ]
 test_dataloader = val_dataloader
 test_evaluator = val_evaluator

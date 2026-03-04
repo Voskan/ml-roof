@@ -394,6 +394,94 @@ class DeepRoofMask2Former(Mask2FormerBase):
             out.query_indices = torch.zeros((0,), dtype=torch.long, device=device)
         return out
 
+    @staticmethod
+    def _filter_instance_predictions(
+        instances: InstanceData,
+        score_thr: float = 0.20,
+        min_area: int = 64,
+        max_instances: int = 120,
+    ) -> InstanceData:
+        """Filter noisy instance predictions for stable facet/AP evaluation."""
+        if instances is None:
+            return instances
+        try:
+            if len(instances) == 0:
+                return instances
+        except Exception:
+            pass
+
+        raw_masks = getattr(instances, 'masks', None)
+        if raw_masks is None:
+            return instances
+        if hasattr(raw_masks, 'to_tensor'):
+            masks = raw_masks.to_tensor(dtype=torch.bool, device='cpu')
+        elif torch.is_tensor(raw_masks):
+            masks = raw_masks.detach().to(dtype=torch.bool, device='cpu')
+        else:
+            masks = torch.as_tensor(raw_masks, dtype=torch.bool, device='cpu')
+        if masks.ndim == 2:
+            masks = masks.unsqueeze(0)
+        n = int(masks.shape[0])
+        if n <= 0:
+            return instances
+
+        scores = getattr(instances, 'scores', None)
+        if torch.is_tensor(scores):
+            scores_t = scores.detach().to(dtype=torch.float32, device='cpu').reshape(-1)
+        elif scores is None:
+            scores_t = torch.ones((n,), dtype=torch.float32)
+        else:
+            scores_t = torch.as_tensor(scores, dtype=torch.float32).reshape(-1)
+        if scores_t.numel() != n:
+            scores_t = torch.ones((n,), dtype=torch.float32)
+
+        labels = getattr(instances, 'labels', None)
+        if torch.is_tensor(labels):
+            labels_t = labels.detach().to(dtype=torch.long, device='cpu').reshape(-1)
+        elif labels is None:
+            labels_t = torch.zeros((n,), dtype=torch.long)
+        else:
+            labels_t = torch.as_tensor(labels, dtype=torch.long).reshape(-1)
+        if labels_t.numel() != n:
+            labels_t = torch.zeros((n,), dtype=torch.long)
+
+        query_indices = getattr(instances, 'query_indices', None)
+        if torch.is_tensor(query_indices):
+            qidx_t = query_indices.detach().to(dtype=torch.long, device='cpu').reshape(-1)
+            if qidx_t.numel() != n:
+                qidx_t = None
+        else:
+            qidx_t = None
+
+        areas = masks.reshape(n, -1).sum(dim=1)
+        keep = (labels_t > 0) & (scores_t >= float(score_thr)) & (areas >= int(max(min_area, 0)))
+        keep_idx = torch.nonzero(keep, as_tuple=False).squeeze(-1)
+        if keep_idx.numel() == 0:
+            h, w = int(masks.shape[-2]), int(masks.shape[-1])
+            device_out = scores.device if torch.is_tensor(scores) else (
+                labels.device if torch.is_tensor(labels) else torch.device('cpu'))
+            instances.masks = torch.zeros((0, h, w), dtype=torch.bool, device=device_out)
+            instances.labels = torch.zeros((0,), dtype=torch.long, device=device_out)
+            instances.scores = torch.zeros((0,), dtype=torch.float32, device=device_out)
+            if qidx_t is not None:
+                instances.query_indices = torch.zeros((0,), dtype=torch.long, device=device_out)
+            return instances
+
+        keep_scores = scores_t[keep_idx]
+        order = torch.argsort(keep_scores, descending=True)
+        if int(max_instances) > 0:
+            order = order[: int(max_instances)]
+        keep_idx = keep_idx[order]
+
+        device_out = scores.device if torch.is_tensor(scores) else (
+            labels.device if torch.is_tensor(labels) else torch.device('cpu'))
+        instances.masks = masks[keep_idx].to(device=device_out)
+        instances.labels = labels_t[keep_idx].to(device=device_out)
+        instances.scores = scores_t[keep_idx].to(device=device_out)
+        if qidx_t is not None:
+            instances.query_indices = qidx_t[keep_idx].to(device=device_out)
+        return instances
+
     def _prepare_gt_instances_for_assigner(
         self,
         gt_instances: InstanceData,
@@ -1126,6 +1214,21 @@ class DeepRoofMask2Former(Mask2FormerBase):
                 sem_data = getattr(pred_sem, 'data', None) if pred_sem is not None else None
                 if torch.is_tensor(sem_data):
                     results[i].pred_instances = self._instances_from_semantic(sem_data)
+
+        # Normalize instance outputs for stable evaluation (drop noisy tiny/low-score facets).
+        score_thr = float(getattr(self.test_cfg, 'instance_score_thr', getattr(self.test_cfg, 'score_thr', 0.20)))
+        min_area = int(getattr(self.test_cfg, 'instance_min_area', 64))
+        max_instances = int(getattr(self.test_cfg, 'max_instances', 120))
+        for i in range(len(results)):
+            pred_instances = getattr(results[i], 'pred_instances', None)
+            if pred_instances is None:
+                continue
+            results[i].pred_instances = self._filter_instance_predictions(
+                pred_instances,
+                score_thr=score_thr,
+                min_area=min_area,
+                max_instances=max_instances,
+            )
 
         # Attach geometry predictions using cached query embeddings
         query_cache = getattr(self.decode_head, 'last_query_embeddings', None)
