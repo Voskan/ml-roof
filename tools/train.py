@@ -167,7 +167,7 @@ def _dump_resolved_cfg(cfg: Config):
 
 
 def _ensure_iou_metric_prefix_and_best_key(cfg: Config) -> str:
-    """Ensure IoUMetric has explicit prefix and return save_best key."""
+    """Ensure IoUMetric has explicit prefix and return a sane IoU save_best key."""
     default_key = 'mIoU'
     val_evaluator = cfg.get('val_evaluator', None)
     if val_evaluator is None:
@@ -192,6 +192,18 @@ def _ensure_iou_metric_prefix_and_best_key(cfg: Config) -> str:
         return f'{prefix}/mIoU'
 
     return default_key
+
+
+def _resolve_save_best_key(cfg: Config) -> str:
+    """Respect explicit config save_best; fallback to IoU key inference only if missing."""
+    default_hooks = cfg.get('default_hooks', None)
+    if isinstance(default_hooks, dict):
+        ckpt = default_hooks.get('checkpoint', None)
+        if isinstance(ckpt, dict):
+            existing = ckpt.get('save_best', None)
+            if isinstance(existing, str) and existing.strip():
+                return existing.strip()
+    return _ensure_iou_metric_prefix_and_best_key(cfg)
 
 
 def _ensure_visible_logging(cfg: Config):
@@ -337,15 +349,16 @@ def main():
     _ensure_visible_logging(cfg)
     _apply_safe_resume_fallback(cfg, resume_requested=args.resume)
     
-    save_best_key = _ensure_iou_metric_prefix_and_best_key(cfg)
+    save_best_key = _resolve_save_best_key(cfg)
 
-    # Checkpoint Configuration (Best IoU)
-    # Ensure default_hooks.checkpoint exists and configure it
-    # We want to save the best model based on mIoU
+    # Checkpoint configuration.
+    # Keep explicitly configured `save_best` untouched; infer only when absent.
     if 'default_hooks' in cfg and 'checkpoint' in cfg.default_hooks:
-        cfg.default_hooks.checkpoint.save_best = save_best_key
-        cfg.default_hooks.checkpoint.rule = 'greater'
-        cfg.default_hooks.checkpoint.max_keep_ckpts = 3
+        ckpt_hook = cfg.default_hooks.checkpoint
+        if ckpt_hook.get('save_best', None) in (None, ''):
+            ckpt_hook.save_best = save_best_key
+        ckpt_hook.setdefault('rule', 'greater')
+        ckpt_hook.setdefault('max_keep_ckpts', 3)
     else:
         # If not in config, add it manually
         cfg.setdefault('default_hooks', {})
