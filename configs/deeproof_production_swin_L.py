@@ -271,9 +271,9 @@ optim_wrapper = dict(
     optimizer=optimizer,
     skip_nonfinite_grad=True,
     max_nonfinite_warnings=20,
-    # FIX Bug #1 (production): max_norm=0.01 is the standard for Mask2Former.
-    # 1.0 allows gradients to explode during bipartite matching.
-    clip_grad=dict(max_norm=0.01, norm_type=2),
+    # Mask2Former standard: max_norm=1.0 keeps gradient scale healthy.
+    # 0.01 was 100x too small — it zeroed every update and caused NaN at iter=10.
+    clip_grad=dict(max_norm=1.0, norm_type=2),
     paramwise_cfg=dict(
         custom_keys={
             'backbone': dict(lr_mult=0.1, decay_mult=1.0)

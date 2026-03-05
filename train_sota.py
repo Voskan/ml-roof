@@ -36,9 +36,12 @@ cfg.default_scope = 'mmseg'
 cfg.work_dir = WORK_DIR
 
 # 3. Path Overrides (Ensure data is found)
-cfg.data_root = str(project_root / 'data/OmniCity/')
-cfg.train_dataloader.dataset.data_root = cfg.data_root
-cfg.val_dataloader.dataset.data_root = cfg.data_root
+# NOTE: data/OmniCity/ was a stale path that does not exist. MassiveMasterDataset
+# is the actual dataset on disk (confirmed by directory listing).
+_data_root = str(project_root / 'data/MassiveMasterDataset/')
+cfg.data_root = _data_root
+cfg.train_dataloader.dataset.data_root = _data_root
+cfg.val_dataloader.dataset.data_root = _data_root
 
 # MMEngine compatibility: enforce loop config triads.
 if cfg.get('val_dataloader') is not None and cfg.get('val_evaluator') is not None and cfg.get('val_cfg') is None:
