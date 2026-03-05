@@ -23,9 +23,10 @@ custom_imports = dict(
     allow_failed_imports=False)
 
 # 1. Shared Model Settings
-# Dataset analysis (500-sample): BG=88%, Sloped=12%, Obstacle=0.5%, Flat=0%, Panel=rare.
-# Confirmed: MassiveMasterDataset has NO flat roofs (class 1) and NO Panel (class 3) in majority of images.
-num_classes = 5  # 0:BG, 1:Flat, 2:Sloped, 3:Panel, 4:Obstacle
+# Expanded 10-class schema (merged from MassiveMasterDataset + roof_information_dataset_2 + yolo_satellite):
+#  0=BG, 1=Flat, 2=Sloped-South, 3=SolarPanel, 4=Obstacle-Generic,
+#  5=Chimney, 6=Dormer/Skylight/Window, 7=Sloped-North, 8=Sloped-EastWest, 9=AC/Mech
+num_classes = 10
 data_preprocessor = dict(
     type='SegDataPreProcessor',
     mean=[123.675, 116.28, 103.53],
@@ -130,14 +131,10 @@ model = dict(
             use_sigmoid=False,
             loss_weight=2.0,
             reduction='mean',
-            # TUNED to actual dataset distribution:
-            # Class 0 (BG): weight=1.0 — dominant class, no boost needed
-            # Class 1 (Flat): weight=8.0 — almost absent in dataset, needs strong signal when present
-            # Class 2 (Sloped): weight=2.0 — 12% of pixels, main foreground class
-            # Class 3 (Panel): weight=12.0 — very rare, critical for solar detection
-            # Class 4 (Obstacle): weight=20.0 — only 0.5% pixels, must not be ignored
-            # Index 5 = no-object: 0.1 is the Mask2Former paper default
-            class_weight=[1.0, 8.0, 2.0, 12.0, 20.0, 0.1]),
+            # 10-class weights (index=10 is no-object, Mask2Former default=0.1)
+            # BG=1.0  Flat=8.0  Sloped-S=3.0  Panel=15.0  Obstacle=15.0
+            # Chimney=20.0  Dormer=10.0  Sloped-N=3.0  Sloped-EW=3.0  AC=15.0  no-obj=0.1
+            class_weight=[1.0, 8.0, 3.0, 15.0, 15.0, 20.0, 10.0, 3.0, 3.0, 15.0, 0.1]),
         loss_mask=dict(
             type='DeepRoofHybridMaskLoss',
             bce_weight=1.0,
@@ -243,7 +240,7 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file='val.txt',
-        test_mode=True,  # Prevent train-time random augmentations in validation.
+        test_mode=True,
         img_suffix='.jpg',
         seg_map_suffix='.png',
         normal_suffix='.npy',

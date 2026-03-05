@@ -23,8 +23,31 @@ class DeepRoofDataset(BaseSegDataset):
         - gt_normals: Dense normal map (3, H, W)
     """
     METAINFO = dict(
-        classes=('background', 'flat_roof', 'sloped_roof', 'solar_panel', 'roof_obstacle'),
-        palette=[[0, 0, 0], [0, 255, 0], [255, 0, 0], [0, 0, 255], [255, 255, 0]]
+        # 10-class schema for roof segmentation (solar panel installation planning)
+        classes=(
+            'background',          # 0
+            'flat_roof',           # 1  — optimal for large panel arrays
+            'sloped_south',        # 2  — best solar yield (was generic sloped)
+            'solar_panel',         # 3  — existing PV installation
+            'obstacle_generic',    # 4  — generic roof obstacle
+            'chimney',             # 5  — hard obstacle, setback required
+            'dormer_skylight',     # 6  — window / dormer / skylight, unusable
+            'sloped_north',        # 7  — low solar yield
+            'sloped_east_west',    # 8  — medium solar yield
+            'ac_mechanical',       # 9  — AC / mech / satellite dish
+        ),
+        palette=[
+            [0,   0,   0  ],  # 0  background       — black
+            [0,   255, 0  ],  # 1  flat_roof         — green
+            [255, 200, 0  ],  # 2  sloped_south      — orange-gold (sun)
+            [0,   0,   255],  # 3  solar_panel       — blue
+            [255, 255, 0  ],  # 4  obstacle_generic  — yellow
+            [200, 0,   0  ],  # 5  chimney           — dark red
+            [128, 0,   255],  # 6  dormer_skylight   — purple
+            [0,   150, 255],  # 7  sloped_north      — ice blue
+            [0,   255, 200],  # 8  sloped_east_west  — teal
+            [255, 100, 0  ],  # 9  ac_mechanical     — orange
+        ]
     )
 
     def __init__(self,
