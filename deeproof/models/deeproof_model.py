@@ -463,16 +463,21 @@ class DeepRoofMask2Former(Mask2FormerBase):
         areas = masks.reshape(n, -1).sum(dim=1)
         keep = (labels_t > 0) & (scores_t >= float(score_thr)) & (areas >= int(max(min_area, 0)))
         keep_idx = torch.nonzero(keep, as_tuple=False).squeeze(-1)
+        device_out = scores.device if torch.is_tensor(scores) else (
+            labels.device if torch.is_tensor(labels) else torch.device('cpu'))
+        h, w = int(masks.shape[-2]), int(masks.shape[-1])
+
         if keep_idx.numel() == 0:
-            h, w = int(masks.shape[-2]), int(masks.shape[-1])
-            device_out = scores.device if torch.is_tensor(scores) else (
-                labels.device if torch.is_tensor(labels) else torch.device('cpu'))
-            instances.masks = torch.zeros((0, h, w), dtype=torch.bool, device=device_out)
-            instances.labels = torch.zeros((0,), dtype=torch.long, device=device_out)
-            instances.scores = torch.zeros((0,), dtype=torch.float32, device=device_out)
+            # Build a brand-new InstanceData so we never violate MMEngine's
+            # length-consistency constraint on the original object.
+            from mmengine.structures import InstanceData as _InstData
+            empty = _InstData()
+            empty.masks  = torch.zeros((0, h, w), dtype=torch.bool,    device=device_out)
+            empty.labels = torch.zeros((0,),       dtype=torch.long,    device=device_out)
+            empty.scores = torch.zeros((0,),       dtype=torch.float32, device=device_out)
             if qidx_t is not None:
-                instances.query_indices = torch.zeros((0,), dtype=torch.long, device=device_out)
-            return instances
+                empty.query_indices = torch.zeros((0,), dtype=torch.long, device=device_out)
+            return empty
 
         keep_scores = scores_t[keep_idx]
         order = torch.argsort(keep_scores, descending=True)
@@ -480,14 +485,18 @@ class DeepRoofMask2Former(Mask2FormerBase):
             order = order[: int(max_instances)]
         keep_idx = keep_idx[order]
 
-        device_out = scores.device if torch.is_tensor(scores) else (
-            labels.device if torch.is_tensor(labels) else torch.device('cpu'))
-        instances.masks = masks[keep_idx].to(device=device_out)
-        instances.labels = labels_t[keep_idx].to(device=device_out)
-        instances.scores = scores_t[keep_idx].to(device=device_out)
+        # Always build a NEW InstanceData — never mutate the original in-place.
+        # MMEngine InstanceData.__setattr__ checks that all fields have the same
+        # length; writing masks[keep_idx] (N-k elements) into an object that still
+        # holds labels/scores/query_indices with N elements raises AssertionError.
+        from mmengine.structures import InstanceData as _InstData
+        out = _InstData()
+        out.masks  = masks[keep_idx].to(device=device_out)
+        out.labels = labels_t[keep_idx].to(device=device_out)
+        out.scores = scores_t[keep_idx].to(device=device_out)
         if qidx_t is not None:
-            instances.query_indices = qidx_t[keep_idx].to(device=device_out)
-        return instances
+            out.query_indices = qidx_t[keep_idx].to(device=device_out)
+        return out
 
     def _prepare_gt_instances_for_assigner(
         self,
