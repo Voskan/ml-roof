@@ -186,7 +186,11 @@ train_dataloader = dict(
     num_workers=8,
     timeout=300,
     persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    # InfiniteSampler: randomly samples each iteration independently (no epoch state).
+    # Critical for fast resume: DefaultSampler causes "Advance dataloader N steps"
+    # which with 26000 iters × 8 samples = 208k images through augmentation (~30-60 min).
+    # InfiniteSampler skips this entirely — training starts immediately after checkpoint load.
+    sampler=dict(type='InfiniteSampler', shuffle=True),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
