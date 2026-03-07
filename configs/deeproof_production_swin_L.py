@@ -43,9 +43,9 @@ model = dict(
     data_preprocessor=data_preprocessor,
     test_cfg=dict(
         mode='whole',
-        # Lowered from 0.20 to 0.10: obstacles cover only 0.5% of pixels and are small.
-        # Too high a threshold silently drops all obstacle predictions.
-        instance_score_thr=0.10,
+        # Raised from 0.10 to 0.15: captures small obstacles while preventing
+        # low-confidence false positives that drive over-segmentation growth.
+        instance_score_thr=0.15,
         instance_min_area=32,   # Smaller: obstacles can be tiny (chimneys, vents)
         max_instances=200,      # Match num_queries — some images have 130+ instances
     ),
@@ -133,8 +133,10 @@ model = dict(
             reduction='mean',
             # 10-class weights (index=10 is no-object, Mask2Former default=0.1)
             # BG=1.0  Flat=8.0  Sloped-S=3.0  Panel=15.0  Obstacle=15.0
-            # Chimney=20.0  Dormer=10.0  Sloped-N=3.0  Sloped-EW=3.0  AC=15.0  no-obj=0.1
-            class_weight=[1.0, 8.0, 3.0, 15.0, 15.0, 20.0, 10.0, 3.0, 3.0, 15.0, 0.1]),
+            # Chimney=20.0  Dormer=10.0  Sloped-N=5.0  Sloped-EW=5.0  AC=15.0  no-obj=0.1
+            # NOTE: Sloped-N (7) and Sloped-EW (8) raised 3→5 because CC-split creates
+            # more, smaller instances of these classes after the dataset fix.
+            class_weight=[1.0, 8.0, 3.0, 15.0, 15.0, 20.0, 10.0, 5.0, 5.0, 15.0, 0.1]),
         loss_mask=dict(
             type='DeepRoofHybridMaskLoss',
             bce_weight=1.0,
@@ -259,7 +261,7 @@ val_evaluator = [
         type='DeepRoofFacetMetric',
         overlap_threshold=0.30,
         # Thresholds must match model.test_cfg for consistent eval/inference behaviour.
-        score_thr=0.10,   # was 0.20 — lowered to capture small obstacles
+        score_thr=0.15,   # Raised from 0.10 — matches instance_score_thr in test_cfg
         min_area=32,      # was 64 — smaller obstacles (chimneys, vents)
         max_dets=200,     # was 120 — match num_queries
     ),
@@ -292,7 +294,7 @@ optim_wrapper = dict(
 )
 
 param_scheduler = [
-    # Linear Warmup for 1500 iterations
+    # Linear Warmup: 1500 iters (same as before, fast ramp-up from checkpoint)
     dict(
         type='LinearLR',
         start_factor=0.001,
@@ -300,19 +302,22 @@ param_scheduler = [
         begin=0,
         end=1500
     ),
-    # Poly Decay for the rest of 100k iters
+    # CosineAnnealingLR: replaces PolyLR (power=0.9 decayed to ~1.5e-6 by iter 100k)
+    # CosineAnnealing bounces LR between lr and eta_min, maintaining gradient energy
+    # throughout training and allowing the model to escape local over-segmentation minima.
+    # T_max covers the full working range (100k - 1500 warmup iterations).
     dict(
-        type='PolyLR',
-        power=0.9,
+        type='CosineAnnealingLR',
+        T_max=98500,  # Full cosine half-period: covers iters 1500→100000
         begin=1500,
         end=100000,
-        eta_min=1e-6,
+        eta_min=2e-6,  # Raised from 1e-6: keeps gradients alive in late training
         by_epoch=False,
     )
 ]
 
 # 4. Runtime Config
-train_cfg = dict(type='IterBasedTrainLoop', max_iters=100000, val_interval=2000)
+train_cfg = dict(type='IterBasedTrainLoop', max_iters=100000, val_interval=1000)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 custom_hooks = [
@@ -328,7 +333,8 @@ default_hooks = dict(
         type='CheckpointHook',
         by_epoch=False,
         interval=2000,
-        max_keep_ckpts=3,
+        # Save top-5 checkpoints to avoid missing best in oscillating region
+        max_keep_ckpts=5,
         save_best='facet/AP50',
         rule='greater',
     )

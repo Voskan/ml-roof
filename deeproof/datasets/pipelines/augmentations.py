@@ -227,12 +227,13 @@ class GoogleMapsAugmentation(GeometricAugmentation):
         degradation_level = float(np.clip(degradation_level, 0.0, 1.0))
         photo_prob = 0.25 + 0.25 * degradation_level
         pipeline = [
-            # 1. Multi-Scale Training Prior (Absolute Ideal)
-            # Randomly scale image from 0.5x to 1.5x to handle GSD variance
-            # Then crop/pad back to original size or whatever dataset expects.
-            # We assume internal caller handles final cropping if needed, 
-            # but RandomScale here adds the diversity.
-            A.RandomScale(scale_limit=0.5, p=0.7),
+            # 1. Multi-Scale Training Prior
+            # Scale image from 0.75x to 1.25x (scale_limit=0.25) to handle GSD variance.
+            # Previously scale_limit=0.5 (0.5x–1.5x): at 0.5x, a 512-px image becomes 256-px,
+            # and after pad-back to 512 px, 75% of the training field is zero — creating
+            # a strong background bias and hurting Hungarian matching quality.
+            # 0.25 limit keeps content-to-padding ratio high while preserving scale diversity.
+            A.RandomScale(scale_limit=0.25, p=0.7),
             
             # Geometric Transforms: Must be tracked for vector rotation
             A.OneOf([

@@ -206,50 +206,52 @@ class DeepRoofDataset(BaseSegDataset):
             inst_counter = 0
             instance_mask = np.zeros_like(semantic_mask, dtype=np.int32)
 
-            # Foreground instance classes only. Background stays id=0.
-            for cls_id in [1, 2, 3, 4]:
+            # Helper: extract (nx, ny) from the normal map regardless of memory layout
+            def _get_nx_ny(normals_arr, binary):
+                if normals_arr.ndim == 3 and normals_arr.shape[2] == 3:
+                    return normals_arr[..., 0], normals_arr[..., 1]
+                elif normals_arr.ndim == 3 and normals_arr.shape[0] == 3:
+                    return normals_arr[0, ...], normals_arr[1, ...]
+                return (np.zeros_like(binary, dtype=np.float32),
+                        np.zeros_like(binary, dtype=np.float32))
+
+            def _azimuth_cc_split(cls_binary, normals_arr, inst_counter, instance_mask):
+                """Split a class mask into facet instances by azimuth direction."""
+                nx, ny = _get_nx_ny(normals_arr, cls_binary)
+                azimuth_rad = np.arctan2(ny, nx)
+                azimuth_rad = np.where(azimuth_rad < 0, azimuth_rad + 2 * np.pi, azimuth_rad)
+                bin_size = (2 * np.pi) / 8.0
+                pi_8 = np.pi / 8.0
+                quantized_az = np.floor((azimuth_rad + pi_8) / bin_size) % 8
+                for az_bin in range(8):
+                    az_mask = ((quantized_az == az_bin) & (cls_binary > 0)).astype(np.uint8)
+                    if az_mask.max() == 0:
+                        continue
+                    # 4-connectivity avoids merging across ridge-lines
+                    num_cc, cc_map = cv2.connectedComponents(az_mask, connectivity=4)
+                    for cc_id in range(1, num_cc):
+                        inst_counter += 1
+                        instance_mask[cc_map == cc_id] = inst_counter
+                return inst_counter
+
+            # Directional (azimuth-split) foreground classes
+            # 2 = sloped-south, 7 = sloped-north, 8 = sloped-east-west
+            AZIMUTH_CLASSES = {2, 7, 8}
+            # All foreground classes in the 10-class schema (classes 1-9)
+            FOREGROUND_CLASSES = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+            for cls_id in FOREGROUND_CLASSES:
                 cls_binary = (semantic_mask == cls_id).astype(np.uint8)
                 if cls_binary.max() == 0:
                     continue
-                
-                # Critical Fix: Split Sloped Roofs (Class 2) by Azimuth to create Layout/Facet Instances
-                if cls_id == 2 and valid_normal > 0.5:
-                    # Calculate Azimuth from dense normal map: arctan2(y, x)
-                    # normals shape is [H, W, 3] if loaded as numpy, but could be [3, H, W] depending on load path.
-                    # Currently normals is [H, W, 3] at this point before tensor conversion.
-                    if normals.ndim == 3 and normals.shape[2] == 3:
-                        nx = normals[..., 0]
-                        ny = normals[..., 1]
-                    elif normals.ndim == 3 and normals.shape[0] == 3:
-                        nx = normals[0, ...]
-                        ny = normals[1, ...]
-                    else:
-                        nx = np.zeros_like(cls_binary, dtype=np.float32)
-                        ny = np.zeros_like(cls_binary, dtype=np.float32)
 
-                    azimuth_rad = np.arctan2(ny, nx)
-                    # Convert -pi..pi to 0..2pi
-                    azimuth_rad = np.where(azimuth_rad < 0, azimuth_rad + 2 * np.pi, azimuth_rad)
-                    
-                    # Quantize into 8 sectors (45 degrees each)
-                    # Offset by 22.5 deg (pi/8) so that cardinal directions are centered in bins.
-                    bin_size = (2 * np.pi) / 8.0
-                    quantized_azimuth = np.floor((azimuth_rad + (pi_8 := np.pi / 8.0)) / bin_size) % 8
-                    
-                    # Run connected components for each direction separately!
-                    for az_bin in range(8):
-                        # Mask for the current roof class AND current azimuth bin
-                        az_mask = ((quantized_azimuth == az_bin) & (cls_binary > 0)).astype(np.uint8)
-                        
-                        if az_mask.max() == 0:
-                            continue
-                            
-                        num_cc, cc_map = cv2.connectedComponents(az_mask, connectivity=4) # 4-conn to avoid diagonal merging across ridgelines
-                        for cc_id in range(1, num_cc):
-                            inst_counter += 1
-                            instance_mask[cc_map == cc_id] = inst_counter
+                if cls_id in AZIMUTH_CLASSES and valid_normal > 0.5:
+                    # Split sloped facets by orientation to learn separate facet layout
+                    inst_counter = _azimuth_cc_split(
+                        cls_binary, normals, inst_counter, instance_mask)
                 else:
-                    # Flat roofs, panels, and obstacles use standard connected components.
+                    # Non-directional classes (flat, panels, chimneys, dormers, AC):
+                    # standard 8-connected components
                     num_cc, cc_map = cv2.connectedComponents(cls_binary, connectivity=8)
                     for cc_id in range(1, num_cc):
                         inst_counter += 1
@@ -496,20 +498,11 @@ class DeepRoofDataset(BaseSegDataset):
             labels = torch.zeros((0,), dtype=torch.long)
             normals_inst = torch.zeros((0, 3), dtype=torch.float32)
 
-        # Add a single background pseudo-instance so class 0 gets direct supervision.
-        bg_mask = (sem_map == 0)
-        if int(bg_mask.sum().item()) >= min_inst_area:
-            bg_mask = bg_mask.unsqueeze(0).bool()
-            bg_label = torch.tensor([0], dtype=torch.long)
-            bg_normal = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
-            if masks.numel() == 0:
-                masks = bg_mask
-                labels = bg_label
-                normals_inst = bg_normal
-            else:
-                masks = torch.cat([masks, bg_mask], dim=0)
-                labels = torch.cat([labels, bg_label], dim=0)
-                normals_inst = torch.cat([normals_inst, bg_normal], dim=0)
+        # NOTE: Background pseudo-instance intentionally removed.
+        # Background (class 0) is already handled by the Mask2Former 'no-object' logit
+        # in the classification head. Injecting a full-image BG mask forces the Hungarian
+        # matcher to assign a query to background, which wastes a query slot, inflates
+        # false-positive rates, and causes over-segmentation growth. Removed.
 
         gt_instances.masks = masks
         gt_instances.labels = labels
